@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import {
   startTransition,
   useCallback,
@@ -9,9 +8,8 @@ import {
 } from "react";
 import { books as seedBooks } from "./data/books";
 
-const OPEN_LIBRARY_HOST = "covers.openlibrary.org";
-
 const STORAGE_KEY = "lydias-lil-library-books";
+const MAX_COVER_BYTES = 1.5 * 1024 * 1024;
 
 const STATUS_STYLES = {
   finished: {
@@ -38,15 +36,20 @@ function statusPillClass(status) {
   return config?.className ?? "bg-stone-200 text-stone-700 ring-1 ring-stone-300/80";
 }
 
+function legacyCover(raw) {
+  const fromImage =
+    typeof raw?.coverImage === "string" ? raw.coverImage.trim() : "";
+  if (fromImage) return fromImage;
+  const fromUrl =
+    typeof raw?.coverUrl === "string" ? raw.coverUrl.trim() : "";
+  return fromUrl;
+}
+
 function normalizeBook(raw) {
   const status =
     typeof raw?.status === "string" && raw.status in STATUS_STYLES
       ? raw.status
       : "want to read";
-  const coverUrl =
-    typeof raw?.coverUrl === "string" && raw.coverUrl.trim()
-      ? raw.coverUrl.trim()
-      : "";
   return {
     id:
       typeof raw?.id === "string" && raw.id.trim()
@@ -57,7 +60,7 @@ function normalizeBook(raw) {
     title: typeof raw?.title === "string" ? raw.title : "",
     author: typeof raw?.author === "string" ? raw.author : "",
     status,
-    coverUrl,
+    coverImage: legacyCover(raw),
     thoughts:
       raw?.thoughts != null && raw.thoughts !== ""
         ? String(raw.thoughts)
@@ -70,20 +73,26 @@ function normalizeList(raw) {
   return raw.map(normalizeBook);
 }
 
-const seedById = Object.fromEntries(
-  seedBooks.map((b) => {
-    const row = normalizeBook(b);
-    return [row.id, row];
-  }),
-);
-
-/** Fill missing coverUrl from seed data for the same id (older localStorage). */
-function enrichCoversFromSeed(list) {
-  return list.map((item) => {
-    const n = normalizeBook(item);
-    const seed = seedById[n.id];
-    if (!seed?.coverUrl || n.coverUrl) return n;
-    return { ...n, coverUrl: seed.coverUrl };
+function readCoverFile(file) {
+  return new Promise((resolve) => {
+    if (!file?.type?.startsWith("image/")) {
+      resolve({ ok: false, error: "Choose an image file (PNG, JPEG, WebP, etc.)." });
+      return;
+    }
+    if (file.size > MAX_COVER_BYTES) {
+      resolve({
+        ok: false,
+        error: `Image must be about ${Math.round(MAX_COVER_BYTES / (1024 * 1024))} MB or smaller so it fits in browser storage.`,
+      });
+      return;
+    }
+    const fr = new FileReader();
+    fr.onload = () => {
+      if (typeof fr.result === "string") resolve({ ok: true, data: fr.result });
+      else resolve({ ok: false, error: "Could not read that file." });
+    };
+    fr.onerror = () => resolve({ ok: false, error: "Could not read that file." });
+    fr.readAsDataURL(file);
   });
 }
 
@@ -111,38 +120,23 @@ function BookCover({ src, title }) {
     );
   }
 
-  let host = "";
-  try {
-    host = new URL(trimmed).hostname;
-  } catch {
+  const isData = trimmed.startsWith("data:image/");
+  const isHttp =
+    trimmed.startsWith("http://") || trimmed.startsWith("https://");
+  if (!isData && !isHttp) {
     return (
       <div
         className={`${frame} flex items-center justify-center px-2 text-center`}
       >
         <span className="text-[0.65rem] leading-snug text-[#a89488]">
-          Invalid image link
+          Use an image upload or an http(s) image URL.
         </span>
-      </div>
-    );
-  }
-
-  if (host === OPEN_LIBRARY_HOST) {
-    return (
-      <div className={frame}>
-        <Image
-          src={trimmed}
-          alt={`Cover art: ${title}`}
-          fill
-          className="object-cover"
-          sizes="(max-width: 640px) 92px, 112px"
-        />
       </div>
     );
   }
 
   return (
     <div className={frame}>
-      {/* User URLs may be any host; Next/Image remotePatterns cannot cover all. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={trimmed}
@@ -181,6 +175,10 @@ function StatusSelect({ value, onChange, id }) {
   );
 }
 
+const inputClass =
+  "w-full rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[1rem] text-[#2c241c] outline-none placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]";
+const labelMuted = "mb-1.5 block text-[0.8rem] text-[#6b5a4d]";
+
 export default function Home() {
   const [bookList, setBookList] = useState(() => seedBooks.map(normalizeBook));
   const [hydrated, setHydrated] = useState(false);
@@ -189,8 +187,20 @@ export default function Home() {
   const [newAuthor, setNewAuthor] = useState("");
   const [newStatus, setNewStatus] = useState("want to read");
   const [newThoughts, setNewThoughts] = useState("");
+  const [newCoverFileData, setNewCoverFileData] = useState("");
   const [newCoverUrl, setNewCoverUrl] = useState("");
   const [addError, setAddError] = useState("");
+
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editAuthor, setEditAuthor] = useState("");
+  const [editStatus, setEditStatus] = useState("want to read");
+  const [editThoughts, setEditThoughts] = useState("");
+  const [editInitialCover, setEditInitialCover] = useState("");
+  const [editCoverFileData, setEditCoverFileData] = useState("");
+  const [editCoverUrl, setEditCoverUrl] = useState("");
+  const [editCoverRemoved, setEditCoverRemoved] = useState(false);
+  const [editError, setEditError] = useState("");
 
   useEffect(() => {
     startTransition(() => {
@@ -198,7 +208,7 @@ export default function Home() {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const list = normalizeList(JSON.parse(raw));
-          if (list) setBookList(enrichCoversFromSeed(list));
+          if (list) setBookList(list);
         }
       } catch {
         /* keep seed */
@@ -222,6 +232,61 @@ export default function Home() {
     );
   }, []);
 
+  const beginEdit = useCallback((book) => {
+    setEditingId(book.id);
+    setEditTitle(book.title);
+    setEditAuthor(book.author);
+    setEditStatus(book.status in STATUS_STYLES ? book.status : "want to read");
+    setEditThoughts(book.thoughts || "");
+    const c = book.coverImage || "";
+    setEditInitialCover(c);
+    setEditCoverFileData("");
+    setEditCoverUrl(
+      c && (c.startsWith("http://") || c.startsWith("https://")) ? c : "",
+    );
+    setEditCoverRemoved(false);
+    setEditError("");
+  }, []);
+
+  const cancelEdit = useCallback(() => {
+    setEditingId(null);
+    setEditError("");
+  }, []);
+
+  const editPreviewCover = editCoverRemoved
+    ? ""
+    : editCoverFileData || editCoverUrl.trim() || editInitialCover;
+
+  const saveEdit = (e) => {
+    e.preventDefault();
+    if (!editingId) return;
+    const title = editTitle.trim();
+    const author = editAuthor.trim();
+    if (!title || !author) {
+      setEditError("Title and author are required.");
+      return;
+    }
+    const coverImage = editCoverRemoved
+      ? ""
+      : editCoverFileData || editCoverUrl.trim() || editInitialCover;
+    setBookList((prev) =>
+      prev.map((b) =>
+        b.id === editingId
+          ? {
+              ...b,
+              title,
+              author,
+              status:
+                editStatus in STATUS_STYLES ? editStatus : "want to read",
+              thoughts: editThoughts.trim(),
+              coverImage,
+            }
+          : b,
+      ),
+    );
+    cancelEdit();
+  };
+
   const handleAddBook = (e) => {
     e.preventDefault();
     const title = newTitle.trim();
@@ -235,6 +300,7 @@ export default function Home() {
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
         : `book-${Date.now()}`;
+    const coverImage = newCoverFileData || newCoverUrl.trim();
     setBookList((prev) => [
       {
         id,
@@ -242,7 +308,7 @@ export default function Home() {
         author,
         status: newStatus in STATUS_STYLES ? newStatus : "want to read",
         thoughts: newThoughts.trim(),
-        coverUrl: newCoverUrl.trim(),
+        coverImage,
       },
       ...prev,
     ]);
@@ -250,9 +316,12 @@ export default function Home() {
     setNewAuthor("");
     setNewStatus("want to read");
     setNewThoughts("");
+    setNewCoverFileData("");
     setNewCoverUrl("");
     setShowAdd(false);
   };
+
+  const newPreviewCover = newCoverFileData || newCoverUrl.trim();
 
   return (
     <div className="min-h-full bg-[#f3ebe1] text-[#2c241c]">
@@ -294,37 +363,31 @@ export default function Home() {
               </p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
                 <label className="block sm:col-span-2">
-                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
-                    Title
-                  </span>
+                  <span className={labelMuted}>Title</span>
                   <input
                     value={newTitle}
                     onChange={(e) => setNewTitle(e.target.value)}
-                    className="w-full rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[1rem] text-[#2c241c] outline-none ring-0 transition-[border,box-shadow] placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
+                    className={inputClass}
                     placeholder="Book title"
                     autoComplete="off"
                   />
                 </label>
                 <label className="block sm:col-span-2">
-                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
-                    Author
-                  </span>
+                  <span className={labelMuted}>Author</span>
                   <input
                     value={newAuthor}
                     onChange={(e) => setNewAuthor(e.target.value)}
-                    className="w-full rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[1rem] text-[#2c241c] outline-none placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
+                    className={inputClass}
                     placeholder="Author name"
                     autoComplete="off"
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
-                    Status
-                  </span>
+                  <span className={labelMuted}>Status</span>
                   <select
                     value={newStatus}
                     onChange={(e) => setNewStatus(e.target.value)}
-                    className="w-full cursor-pointer rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[0.95rem] text-[#2c241c] outline-none focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
+                    className={`${inputClass} cursor-pointer text-[0.95rem]`}
                   >
                     {STATUS_ORDER.map((s) => (
                       <option key={s} value={s}>
@@ -333,24 +396,79 @@ export default function Home() {
                     ))}
                   </select>
                 </label>
-                <label className="block sm:col-span-2">
-                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
-                    Cover image URL{" "}
+                <div className="block sm:col-span-2">
+                  <span className={labelMuted}>
+                    Cover{" "}
                     <span className="font-normal normal-case text-[#a89488]">
-                      (optional)
+                      upload an image or paste a URL
                     </span>
                   </span>
-                  <input
-                    type="url"
-                    value={newCoverUrl}
-                    onChange={(e) => setNewCoverUrl(e.target.value)}
-                    className="w-full rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[0.95rem] text-[#2c241c] outline-none placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
-                    placeholder="https://covers.openlibrary.org/b/isbn/…-L.jpg"
-                    autoComplete="off"
-                  />
-                </label>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <div className="relative w-[5.25rem] shrink-0 sm:w-[6rem]">
+                      <BookCover src={newPreviewCover} title={newTitle || "Book"} />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <div>
+                        <input
+                          id="new-cover-file"
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          onChange={async (ev) => {
+                            const f = ev.target.files?.[0];
+                            ev.target.value = "";
+                            if (!f) return;
+                            const r = await readCoverFile(f);
+                            if (!r.ok) {
+                              setAddError(r.error);
+                              return;
+                            }
+                            setAddError("");
+                            setNewCoverFileData(r.data);
+                            setNewCoverUrl("");
+                          }}
+                        />
+                        <label
+                          htmlFor="new-cover-file"
+                          className="inline-flex cursor-pointer rounded-full border border-[#c9b8a8] bg-[#faf8f4] px-3 py-1.5 text-[0.8rem] text-[#4a3d34] transition-colors hover:bg-[#f0e8de]"
+                        >
+                          Choose image…
+                        </label>
+                        {newCoverFileData ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewCoverFileData("");
+                              setAddError("");
+                            }}
+                            className="ml-2 text-[0.8rem] text-[#6b5a4d] underline-offset-4 hover:underline"
+                          >
+                            Clear upload
+                          </button>
+                        ) : null}
+                      </div>
+                      <input
+                        type="text"
+                        value={newCoverUrl}
+                        onChange={(e) => {
+                          setNewCoverUrl(e.target.value);
+                          if (e.target.value.trim()) setNewCoverFileData("");
+                          setAddError("");
+                        }}
+                        className={`${inputClass} text-[0.95rem]`}
+                        placeholder="https://… (direct link to an image)"
+                        autoComplete="off"
+                      />
+                    </div>
+                  </div>
+                  <p className="mt-2 text-[0.7rem] leading-snug text-[#a89488]">
+                    Uploads are stored in your browser (about{" "}
+                    {Math.round(MAX_COVER_BYTES / (1024 * 1024))} MB max per
+                    image). Very large libraries may hit storage limits.
+                  </p>
+                </div>
                 <label className="block sm:col-span-2">
-                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
+                  <span className={labelMuted}>
                     Thoughts{" "}
                     <span className="font-normal normal-case text-[#a89488]">
                       (optional)
@@ -360,7 +478,7 @@ export default function Home() {
                     value={newThoughts}
                     onChange={(e) => setNewThoughts(e.target.value)}
                     rows={3}
-                    className="w-full resize-y rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[0.95rem] leading-relaxed text-[#2c241c] outline-none placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
+                    className={`${inputClass} resize-y text-[0.95rem] leading-relaxed`}
                     placeholder="A line or two for your journal…"
                   />
                 </label>
@@ -395,37 +513,204 @@ export default function Home() {
 
       <main className="mx-auto max-w-2xl px-6 py-12 sm:py-14">
         <ol className="flex flex-col gap-9">
-          {bookList.map((book) => (
-            <li key={book.id}>
-              <article className="group flex gap-5 rounded-[2px] bg-[#fffdf9] p-6 shadow-[0_1px_0_rgba(44,36,28,0.06),0_12px_40px_-18px_rgba(62,47,34,0.35)] ring-1 ring-[#e8dcd0] transition-[box-shadow,transform] duration-300 hover:shadow-[0_1px_0_rgba(44,36,28,0.08),0_16px_48px_-16px_rgba(62,47,34,0.42)] sm:gap-6 sm:p-7">
-                <div className="relative w-[5.75rem] shrink-0 self-start sm:w-[7rem]">
-                  <BookCover src={book.coverUrl} title={book.title} />
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col gap-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <h2 className="text-[1.35rem] font-normal leading-snug tracking-tight text-[#1a1410] sm:text-[1.45rem]">
-                        {book.title}
-                      </h2>
-                      <p className="mt-1.5 text-[0.95rem] italic text-[#6b5a4d]">
-                        {book.author}
-                      </p>
-                    </div>
-                    <StatusSelect
-                      id={`status-${book.id}`}
-                      value={book.status}
-                      onChange={(status) => updateBookStatus(book.id, status)}
-                    />
-                  </div>
-                  {book.thoughts ? (
-                    <blockquote className="border-l-[3px] border-[#ddcbb8]/90 pl-4 text-[0.92rem] leading-[1.65] text-[#7d6c62]">
-                      {book.thoughts}
-                    </blockquote>
-                  ) : null}
-                </div>
-              </article>
-            </li>
-          ))}
+          {bookList.map((book) => {
+            const isEditing = editingId === book.id;
+
+            return (
+              <li key={book.id}>
+                <article className="group flex gap-5 rounded-[2px] bg-[#fffdf9] p-6 shadow-[0_1px_0_rgba(44,36,28,0.06),0_12px_40px_-18px_rgba(62,47,34,0.35)] ring-1 ring-[#e8dcd0] transition-[box-shadow,transform] duration-300 hover:shadow-[0_1px_0_rgba(44,36,28,0.08),0_16px_48px_-16px_rgba(62,47,34,0.42)] sm:gap-6 sm:p-7">
+                  {isEditing ? (
+                    <form
+                      className="flex w-full flex-col gap-5 sm:flex-row sm:gap-6"
+                      onSubmit={saveEdit}
+                    >
+                      <div className="relative w-[5.75rem] shrink-0 self-start sm:w-[7rem]">
+                        <BookCover
+                          src={editPreviewCover}
+                          title={editTitle || book.title}
+                        />
+                      </div>
+                      <div className="flex min-w-0 flex-1 flex-col gap-4">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <p className="text-[0.85rem] uppercase tracking-[0.12em] text-[#8a7365]">
+                            Edit entry
+                          </p>
+                          <button
+                            type="button"
+                            onClick={cancelEdit}
+                            className="text-[0.8rem] text-[#6b5a4d] underline-offset-4 hover:underline"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <label className="block">
+                          <span className={labelMuted}>Title</span>
+                          <input
+                            value={editTitle}
+                            onChange={(e) => setEditTitle(e.target.value)}
+                            className={inputClass}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className={labelMuted}>Author</span>
+                          <input
+                            value={editAuthor}
+                            onChange={(e) => setEditAuthor(e.target.value)}
+                            className={inputClass}
+                          />
+                        </label>
+                        <label className="block max-w-xs">
+                          <span className={labelMuted}>Status</span>
+                          <select
+                            value={editStatus}
+                            onChange={(e) => setEditStatus(e.target.value)}
+                            className={`${inputClass} cursor-pointer text-[0.95rem]`}
+                          >
+                            {STATUS_ORDER.map((s) => (
+                              <option key={s} value={s}>
+                                {STATUS_STYLES[s].label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <div>
+                          <span className={labelMuted}>
+                            Cover — upload or URL
+                          </span>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <input
+                              id={`edit-cover-file-${book.id}`}
+                              type="file"
+                              accept="image/*"
+                              className="sr-only"
+                              onChange={async (ev) => {
+                                const f = ev.target.files?.[0];
+                                ev.target.value = "";
+                                if (!f) return;
+                                const r = await readCoverFile(f);
+                                if (!r.ok) {
+                                  setEditError(r.error);
+                                  return;
+                                }
+                                setEditError("");
+                                setEditCoverRemoved(false);
+                                setEditCoverFileData(r.data);
+                                setEditCoverUrl("");
+                              }}
+                            />
+                            <label
+                              htmlFor={`edit-cover-file-${book.id}`}
+                              className="inline-flex cursor-pointer rounded-full border border-[#c9b8a8] bg-[#faf8f4] px-3 py-1.5 text-[0.8rem] text-[#4a3d34] transition-colors hover:bg-[#f0e8de]"
+                            >
+                              Choose image…
+                            </label>
+                            <input
+                              type="text"
+                              value={editCoverUrl}
+                              onChange={(e) => {
+                                setEditCoverUrl(e.target.value);
+                                if (e.target.value.trim()) {
+                                  setEditCoverFileData("");
+                                  setEditCoverRemoved(false);
+                                }
+                                setEditError("");
+                              }}
+                              className={`${inputClass} max-w-md flex-1 text-[0.85rem]`}
+                              placeholder="Image URL (https://…)"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditCoverFileData("");
+                                setEditCoverUrl("");
+                                setEditCoverRemoved(true);
+                                setEditError("");
+                              }}
+                              className="text-[0.8rem] text-[#8b4a3c] underline-offset-4 hover:underline"
+                            >
+                              Remove cover
+                            </button>
+                          </div>
+                        </div>
+                        <label className="block">
+                          <span className={labelMuted}>
+                            Thoughts{" "}
+                            <span className="font-normal normal-case text-[#a89488]">
+                              (optional)
+                            </span>
+                          </span>
+                          <textarea
+                            value={editThoughts}
+                            onChange={(e) => setEditThoughts(e.target.value)}
+                            rows={3}
+                            className={`${inputClass} resize-y text-[0.95rem] leading-relaxed`}
+                          />
+                        </label>
+                        {editError ? (
+                          <p
+                            className="text-[0.85rem] text-[#8b4a3c]"
+                            role="alert"
+                          >
+                            {editError}
+                          </p>
+                        ) : null}
+                        <div className="flex flex-wrap gap-3 pt-1">
+                          <button
+                            type="submit"
+                            className="rounded-full bg-[#4a3d34] px-5 py-2 text-[0.85rem] font-medium tracking-wide text-[#faf5ee] transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a3d34]"
+                          >
+                            Save changes
+                          </button>
+                        </div>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="relative w-[5.75rem] shrink-0 self-start sm:w-[7rem]">
+                        <BookCover
+                          src={book.coverImage}
+                          title={book.title}
+                        />
+                      </div>
+                      <div className="flex min-w-0 flex-1 flex-col gap-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <h2 className="text-[1.35rem] font-normal leading-snug tracking-tight text-[#1a1410] sm:text-[1.45rem]">
+                              {book.title}
+                            </h2>
+                            <p className="mt-1.5 text-[0.95rem] italic text-[#6b5a4d]">
+                              {book.author}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-start sm:gap-2">
+                            <StatusSelect
+                              id={`status-${book.id}`}
+                              value={book.status}
+                              onChange={(status) =>
+                                updateBookStatus(book.id, status)
+                              }
+                            />
+                            <button
+                              type="button"
+                              onClick={() => beginEdit(book)}
+                              className="rounded-full border border-[#ddcbb8] bg-[#faf8f4] px-3 py-1.5 text-[0.75rem] font-medium uppercase tracking-[0.12em] text-[#5c4d42] transition-colors hover:bg-[#f0e8de] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a08068]"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                        {book.thoughts ? (
+                          <blockquote className="border-l-[3px] border-[#ddcbb8]/90 pl-4 text-[0.92rem] leading-[1.65] text-[#7d6c62]">
+                            {book.thoughts}
+                          </blockquote>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </article>
+              </li>
+            );
+          })}
         </ol>
       </main>
     </div>
