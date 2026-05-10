@@ -5,6 +5,8 @@ export const books = [
     author: "Yoko Tawada",
     status: "finished",
     thoughts: "Didn't love this one as much as I thought I would.",
+    coverUrl:
+      "https://covers.openlibrary.org/b/isbn/9781101970755-L.jpg",
   },
   {
     id: "acotar",
@@ -13,6 +15,8 @@ export const books = [
     status: "finished",
     thoughts:
       "Holy hell. Slow at first, but man does Sarah J. Maas know how to write the second half of a book.",
+    coverUrl:
+      "https://covers.openlibrary.org/b/isbn/9781619630345-L.jpg",
   },
   {
     id: "run-your-plow",
@@ -20,6 +24,8 @@ export const books = [
     author: "Louise Erdrich",
     status: "want to read",
     thoughts: "Recommendation by Sarah!",
+    coverUrl:
+      "https://covers.openlibrary.org/b/isbn/9780525541331-L.jpg",
   },
   {
     id: "demon-copperhead",
@@ -27,5 +33,7 @@ export const books = [
     author: "Barbara Kingsolver",
     status: "want to read",
     thoughts: "My mama loved this one.",
+    coverUrl:
+      "https://covers.openlibrary.org/b/isbn/9780063251922-L.jpg",
   },
 ];

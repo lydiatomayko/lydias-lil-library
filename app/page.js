@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   startTransition,
   useCallback,
@@ -7,6 +8,8 @@ import {
   useState,
 } from "react";
 import { books as seedBooks } from "./data/books";
+
+const OPEN_LIBRARY_HOST = "covers.openlibrary.org";
 
 const STORAGE_KEY = "lydias-lil-library-books";
 
@@ -40,6 +43,10 @@ function normalizeBook(raw) {
     typeof raw?.status === "string" && raw.status in STATUS_STYLES
       ? raw.status
       : "want to read";
+  const coverUrl =
+    typeof raw?.coverUrl === "string" && raw.coverUrl.trim()
+      ? raw.coverUrl.trim()
+      : "";
   return {
     id:
       typeof raw?.id === "string" && raw.id.trim()
@@ -50,6 +57,7 @@ function normalizeBook(raw) {
     title: typeof raw?.title === "string" ? raw.title : "",
     author: typeof raw?.author === "string" ? raw.author : "",
     status,
+    coverUrl,
     thoughts:
       raw?.thoughts != null && raw.thoughts !== ""
         ? String(raw.thoughts)
@@ -60,6 +68,89 @@ function normalizeBook(raw) {
 function normalizeList(raw) {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   return raw.map(normalizeBook);
+}
+
+const seedById = Object.fromEntries(
+  seedBooks.map((b) => {
+    const row = normalizeBook(b);
+    return [row.id, row];
+  }),
+);
+
+/** Fill missing coverUrl from seed data for the same id (older localStorage). */
+function enrichCoversFromSeed(list) {
+  return list.map((item) => {
+    const n = normalizeBook(item);
+    const seed = seedById[n.id];
+    if (!seed?.coverUrl || n.coverUrl) return n;
+    return { ...n, coverUrl: seed.coverUrl };
+  });
+}
+
+function BookCover({ src, title }) {
+  const frame =
+    "relative aspect-[2/3] w-full overflow-hidden rounded-sm bg-[#ede5dc] ring-1 ring-[#e0d0c4] shadow-[inset_0_1px_2px_rgba(44,36,28,0.08)]";
+  const trimmed = typeof src === "string" ? src.trim() : "";
+
+  if (!trimmed) {
+    const letter = (title.trim().charAt(0) || "?").toUpperCase();
+    return (
+      <div
+        className={`${frame} flex flex-col items-center justify-center px-2 text-center`}
+      >
+        <span
+          className="font-serif text-[1.75rem] font-normal leading-none text-[#8a7365]"
+          aria-hidden
+        >
+          {letter}
+        </span>
+        <span className="mt-2 font-mono text-[0.55rem] uppercase tracking-[0.2em] text-[#b5a69a]">
+          Cover
+        </span>
+      </div>
+    );
+  }
+
+  let host = "";
+  try {
+    host = new URL(trimmed).hostname;
+  } catch {
+    return (
+      <div
+        className={`${frame} flex items-center justify-center px-2 text-center`}
+      >
+        <span className="text-[0.65rem] leading-snug text-[#a89488]">
+          Invalid image link
+        </span>
+      </div>
+    );
+  }
+
+  if (host === OPEN_LIBRARY_HOST) {
+    return (
+      <div className={frame}>
+        <Image
+          src={trimmed}
+          alt={`Cover art: ${title}`}
+          fill
+          className="object-cover"
+          sizes="(max-width: 640px) 92px, 112px"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={frame}>
+      {/* User URLs may be any host; Next/Image remotePatterns cannot cover all. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={trimmed}
+        alt={`Cover art: ${title}`}
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+    </div>
+  );
 }
 
 function StatusSelect({ value, onChange, id }) {
@@ -98,6 +189,7 @@ export default function Home() {
   const [newAuthor, setNewAuthor] = useState("");
   const [newStatus, setNewStatus] = useState("want to read");
   const [newThoughts, setNewThoughts] = useState("");
+  const [newCoverUrl, setNewCoverUrl] = useState("");
   const [addError, setAddError] = useState("");
 
   useEffect(() => {
@@ -106,7 +198,7 @@ export default function Home() {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const list = normalizeList(JSON.parse(raw));
-          if (list) setBookList(list);
+          if (list) setBookList(enrichCoversFromSeed(list));
         }
       } catch {
         /* keep seed */
@@ -150,6 +242,7 @@ export default function Home() {
         author,
         status: newStatus in STATUS_STYLES ? newStatus : "want to read",
         thoughts: newThoughts.trim(),
+        coverUrl: newCoverUrl.trim(),
       },
       ...prev,
     ]);
@@ -157,6 +250,7 @@ export default function Home() {
     setNewAuthor("");
     setNewStatus("want to read");
     setNewThoughts("");
+    setNewCoverUrl("");
     setShowAdd(false);
   };
 
@@ -241,6 +335,22 @@ export default function Home() {
                 </label>
                 <label className="block sm:col-span-2">
                   <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
+                    Cover image URL{" "}
+                    <span className="font-normal normal-case text-[#a89488]">
+                      (optional)
+                    </span>
+                  </span>
+                  <input
+                    type="url"
+                    value={newCoverUrl}
+                    onChange={(e) => setNewCoverUrl(e.target.value)}
+                    className="w-full rounded-sm border border-[#ddcbb8] bg-[#faf8f4] px-3 py-2 text-[0.95rem] text-[#2c241c] outline-none placeholder:text-[#a89488] focus:border-[#b89a80] focus:shadow-[inset_0_0_0_1px_rgba(184,154,128,0.35)]"
+                    placeholder="https://covers.openlibrary.org/b/isbn/…-L.jpg"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="mb-1.5 block text-[0.8rem] text-[#6b5a4d]">
                     Thoughts{" "}
                     <span className="font-normal normal-case text-[#a89488]">
                       (optional)
@@ -287,28 +397,32 @@ export default function Home() {
         <ol className="flex flex-col gap-9">
           {bookList.map((book) => (
             <li key={book.id}>
-              <article className="group relative rounded-[2px] bg-[#fffdf9] p-6 shadow-[0_1px_0_rgba(44,36,28,0.06),0_12px_40px_-18px_rgba(62,47,34,0.35)] ring-1 ring-[#e8dcd0] transition-[box-shadow,transform] duration-300 hover:shadow-[0_1px_0_rgba(44,36,28,0.08),0_16px_48px_-16px_rgba(62,47,34,0.42)] sm:p-7">
-                <div className="absolute left-0 top-6 bottom-6 w-px bg-gradient-to-b from-transparent via-[#d4b896]/40 to-transparent sm:top-7 sm:bottom-7" />
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <h2 className="text-[1.35rem] font-normal leading-snug tracking-tight text-[#1a1410] sm:text-[1.45rem]">
-                      {book.title}
-                    </h2>
-                    <p className="mt-1.5 text-[0.95rem] italic text-[#6b5a4d]">
-                      {book.author}
-                    </p>
-                  </div>
-                  <StatusSelect
-                    id={`status-${book.id}`}
-                    value={book.status}
-                    onChange={(status) => updateBookStatus(book.id, status)}
-                  />
+              <article className="group flex gap-5 rounded-[2px] bg-[#fffdf9] p-6 shadow-[0_1px_0_rgba(44,36,28,0.06),0_12px_40px_-18px_rgba(62,47,34,0.35)] ring-1 ring-[#e8dcd0] transition-[box-shadow,transform] duration-300 hover:shadow-[0_1px_0_rgba(44,36,28,0.08),0_16px_48px_-16px_rgba(62,47,34,0.42)] sm:gap-6 sm:p-7">
+                <div className="relative w-[5.75rem] shrink-0 self-start sm:w-[7rem]">
+                  <BookCover src={book.coverUrl} title={book.title} />
                 </div>
-                {book.thoughts ? (
-                  <blockquote className="mt-5 border-l-[3px] border-[#ddcbb8]/90 pl-4 text-[0.92rem] leading-[1.65] text-[#7d6c62]">
-                    {book.thoughts}
-                  </blockquote>
-                ) : null}
+                <div className="flex min-w-0 flex-1 flex-col gap-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <h2 className="text-[1.35rem] font-normal leading-snug tracking-tight text-[#1a1410] sm:text-[1.45rem]">
+                        {book.title}
+                      </h2>
+                      <p className="mt-1.5 text-[0.95rem] italic text-[#6b5a4d]">
+                        {book.author}
+                      </p>
+                    </div>
+                    <StatusSelect
+                      id={`status-${book.id}`}
+                      value={book.status}
+                      onChange={(status) => updateBookStatus(book.id, status)}
+                    />
+                  </div>
+                  {book.thoughts ? (
+                    <blockquote className="border-l-[3px] border-[#ddcbb8]/90 pl-4 text-[0.92rem] leading-[1.65] text-[#7d6c62]">
+                      {book.thoughts}
+                    </blockquote>
+                  ) : null}
+                </div>
               </article>
             </li>
           ))}
